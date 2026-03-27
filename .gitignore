@@ -12,3 +12,7 @@ wheels/
 # data
 **/data/
 **/restored/
+**/solutions/
+**/best/
+
+.DS_Store
