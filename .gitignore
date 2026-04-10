@@ -15,4 +15,5 @@ wheels/
 **/solutions/
 **/best/
 
+**/.DS_Store
 .DS_Store
