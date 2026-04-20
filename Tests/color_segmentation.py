@@ -20,7 +20,7 @@ def Malanobis_distance(im, mean, cov):
 
 # read samle image from url
 
-imBGR = cv2.imread('Challenge-2/data/train/train_5.jpg')
+imBGR = cv2.imread('./kodim07.png')
 imRGB = cv2.cvtColor(imBGR, cv2.COLOR_BGR2RGB)
 
 #display image and let the user select a list of RGB color points
