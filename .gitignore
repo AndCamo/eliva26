@@ -17,3 +17,9 @@ wheels/
 
 **/.DS_Store
 .DS_Store
+
+
+GEMINI.md
+
+**/checkpoints/
+**/wandb/
