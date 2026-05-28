@@ -7,7 +7,7 @@ import os
 
 class InkDetectionDataset(Dataset):
     def __init__(self, fragment_ids, data_dir, patch_size=256, slice_range=(20, 45), 
-                 samples_per_epoch=1000, ink_prob=0.5, transform=None):
+                 samples_per_epoch=1000, ink_prob=0.5, augment=False, transform=None):
         """
         Args:
             fragment_ids (list): List of fragment directory names.
@@ -16,6 +16,7 @@ class InkDetectionDataset(Dataset):
             slice_range (tuple): Range of Z-slices to load (start, end).
             samples_per_epoch (int): Total number of patches to return in one epoch.
             ink_prob (float): Probability of forcing a patch to contain at least some ink.
+            augment (bool): Whether to apply random rotations and flips.
             transform (callable, optional): Optional transform to be applied on a sample.
         """
         self.fragment_ids = fragment_ids
@@ -24,6 +25,7 @@ class InkDetectionDataset(Dataset):
         self.slice_range = slice_range
         self.samples_per_epoch = samples_per_epoch
         self.ink_prob = ink_prob
+        self.augment = augment
         self.transform = transform
 
         # Caching masks and ink-pixel coordinates for fast sampling
@@ -83,48 +85,53 @@ class InkDetectionDataset(Dataset):
         
         # 2. Decide if we want an 'ink' patch or a 'random valid papyrus' patch
         if np.random.random() < self.ink_prob and len(self.ink_coords[fragment_id]) > 0:
-            # Pick a coordinate from the ink list
-            # We pick a random ink pixel and use it as an anchor (randomly positioned within the patch)
             random_idx = np.random.randint(0, len(self.ink_coords[fragment_id]))
             anchor_y, anchor_x = self.ink_coords[fragment_id][random_idx]
-            
-            # Randomize offset so the ink pixel isn't always at the top-left
             offset_y = np.random.randint(0, self.patch_size)
             offset_x = np.random.randint(0, self.patch_size)
-            
-            # Calculate top-left corner of the patch, ensuring it stays within bounds
-            # max ensures we don't go negative, min ensures we don't go out of bounds
             y = max(0, min(anchor_y - offset_y, self.masks[fragment_id].shape[0] - self.patch_size))
             x = max(0, min(anchor_x - offset_x, self.masks[fragment_id].shape[1] - self.patch_size))
         else:
-            # Pick a completely random coordinate from anywhere within the papyrus mask
             random_idx = np.random.randint(0, len(self.valid_coords[fragment_id]))
             y, x = self.valid_coords[fragment_id][random_idx]
 
-        # 3. Load the 3D volume patch using memory mapping
-        # IMPORTANT: Open the .npy file here inside __getitem__ to be compatible with num_workers > 0
+        # 3. Load the 3D volume patch
         volume_path = self.data_dir / fragment_id / "surface_volume_batch.npy"
-        
-        # mmap_mode='r' makes this extremely fast and RAM-efficient
         volume = np.load(volume_path, mmap_mode='r')
         
-        # Extract the 3D patch: [Slices, Patch_H, Patch_W]
         z1, z2 = self.slice_range
         patch_3d = volume[z1:z2, y:y+self.patch_size, x:x+self.patch_size]
-        
-        # Convert to float and normalize to [0, 1]
-        # Since it's uint16, we divide by 65535
         patch_3d = patch_3d.astype(np.float32) / 65535.0
         
-        # Extract the label patch
         label_patch = self.labels[fragment_id][y:y+self.patch_size, x:x+self.patch_size]
         
-        # Convert to tensors
-        volume_tensor = torch.from_numpy(patch_3d) # Shape: [C, H, W]
-        label_tensor = torch.from_numpy(label_patch).float() # Shape: [H, W]
+        # 4. Data Augmentation
+        if self.augment:
+            # Horizontal Flip
+            if np.random.random() < 0.5:
+                patch_3d = np.flip(patch_3d, axis=2)
+                label_patch = np.flip(label_patch, axis=1)
+            
+            # Vertical Flip
+            if np.random.random() < 0.5:
+                patch_3d = np.flip(patch_3d, axis=1)
+                label_patch = np.flip(label_patch, axis=0)
+            
+            # Random Rotation (0, 90, 180, 270 degrees)
+            k = np.random.randint(0, 4)
+            patch_3d = np.rot90(patch_3d, k=k, axes=(1, 2))
+            label_patch = np.rot90(label_patch, k=k, axes=(0, 1))
+            
+            # Ensure memory is contiguous after flips/rotations for PyTorch
+            patch_3d = patch_3d.copy()
+            label_patch = label_patch.copy()
         
-        # Apply transforms if any
+        # 5. Convert to tensors
+        volume_tensor = torch.from_numpy(patch_3d)
+        label_tensor = torch.from_numpy(label_patch).float()
+        
+        # Apply external transform if any
         if self.transform:
             volume_tensor, label_tensor = self.transform(volume_tensor, label_tensor)
             
-        return volume_tensor, label_tensor.unsqueeze(0) # Unsqueeze label to [1, H, W] for easier loss calculation
+        return volume_tensor, label_tensor.unsqueeze(0)

@@ -1,12 +1,5 @@
 import os
 from pathlib import Path
-
-# Indirizza i file temporanei verso il disco capiente
-fast_tmp_dir = str(Path.home() / "Vesuvius-Challenge" / "torch_tmp")
-os.environ["TMPDIR"] = fast_tmp_dir
-# Isola il processo sulla GPU 1 (lasciando in pace i processi altrui sulla GPU 0)
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -17,7 +10,7 @@ import wandb
 
 # Import dei moduli custom
 from ink_dataset import InkDetectionDataset
-from ink_detection_net_v2 import InkDetectionNetV2
+from ink_detection_net import InkDetectionNet
 
 
 def wandb_enabled():
@@ -56,14 +49,13 @@ def get_optimizer(model):
     custom_params = []
     
     for name, param in model.named_parameters():
-        # In V2, the backbone is called 'encoder'
-        if 'encoder' in name and 'conv_stem' not in name:
+        if 'backbone' in name and 'conv1' not in name:
             backbone_params.append(param)
         else:
             custom_params.append(param)
             
     optimizer = torch.optim.AdamW([
-        {'params': backbone_params, 'lr': 5e-6},
+        {'params': backbone_params, 'lr': 5e-6}, # LR ridotto per la backbone
         {'params': custom_params, 'lr': 1e-4}
     ], weight_decay=1e-4)
     
@@ -72,14 +64,15 @@ def get_optimizer(model):
 
 def train_model():
     # --- Training Parameters ---
+    # Nota: Assicurati che questo percorso sia corretto per il tuo Mac
     data_dir = "/Volumes/ZX20/eliva-26-ink-detection/train"
     epochs = 100 
-    batch_size = 16 # Aumentato visto i 50GB di VRAM, ma occhio con la EffNetV2-L
+    batch_size = 4  
     patch_size = 256
     slice_range = (15, 45)  
     input_channels = slice_range[1] - slice_range[0]  
-    num_workers = 4  
-    patience_limit = 10
+    num_workers = 0   
+    patience_limit = 10 # Alzata leggermente vista la fase di freezing
     patience_counter = 0
     
     use_wandb = wandb_enabled()
@@ -89,27 +82,34 @@ def train_model():
         wandb.init(
             project="challenge-3-ink-detection",
             config={
-                "encoder_lr": 5e-6,
+                "backbone_lr": 5e-6,
                 "decoder_lr": 1e-4,
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "patch_size": patch_size,
-                "architecture": "EfficientNetV2-L-UNet"
+                "architecture": "ResNet50-UNet"
             }
         )
 
-    # Selezione Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Selezione Device (Preferenza per MPS su Mac)
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # --- Data Splitting (Multi-Fragment) ---
     all_fragments = [d.name for d in Path(data_dir).iterdir() if d.is_dir() and not d.name.startswith('.')]
     if len(all_fragments) < 5:
-        raise ValueError("Need at least 5 fragments total to support 4 validation fragments.")
-        
-    # I 4 frammenti eterogenei per una validazione robusta
-    val_fragments = ['p_5qlsf5h5b1yy', 'p_hwx6h1ybz19s', 'p_cls0w7rbx6e4', 'p_yjx64pa5da7o']
-    train_fragments = [frag for frag in all_fragments if frag not in val_fragments]
+        # Fallback se non ci sono abbastanza frammenti per la validazione specifica
+        val_fragments = all_fragments[:1]
+        train_fragments = all_fragments[1:]
+    else:
+        # I frammenti indicati nel file originale
+        val_fragments = ['p_5qlsf5h5b1yy', 'p_hwx6h1ybz19s', 'p_cls0w7rbx6e4', 'p_yjx64pa5da7o']
+        train_fragments = [frag for frag in all_fragments if frag not in val_fragments]
     
     print(f"Training on: {len(train_fragments)} fragments")
     print(f"Validating on: {val_fragments}")
@@ -121,18 +121,19 @@ def train_model():
     )
     val_dataset = InkDetectionDataset(
         fragment_ids=val_fragments, data_dir=data_dir, patch_size=patch_size, 
-        samples_per_epoch=800, ink_prob=0, slice_range=slice_range, augment=False
+        samples_per_epoch=800, ink_prob=0.0, slice_range=slice_range, augment=False
     )
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers = num_workers, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers = num_workers, pin_memory=True)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     # --- Model, Loss, Optimizer ---
-    model = InkDetectionNetV2(input_channels=input_channels).to(device)
+    model = InkDetectionNet(input_channels=input_channels).to(device)
     
     # --- INITIAL BACKBONE FREEZING ---
-    print("Freezing encoder for the first 3 epochs...")
-    for name, param in model.encoder.named_parameters():
-        if "conv_stem" not in name:
+    print("Freezing backbone for the first 3 epochs...")
+    for name, param in model.backbone.named_parameters():
+        if "conv1" not in name:
             param.requires_grad = False
             
     criterion = BCEDiceLoss(bce_weight=0.5)
@@ -145,16 +146,13 @@ def train_model():
     save_dir = Path("checkpoints")
     save_dir.mkdir(exist_ok=True)
     
-    # Inizializza lo scaler per l'Automatic Mixed Precision (AMP)
-    scaler = torch.amp.GradScaler('cuda')
-    
     for epoch in range(epochs):
         # --- GRADUAL UNFREEZING ---
         if epoch == 3:
-            print("\n[!] Unfreezing encoder for fine-tuning...")
-            for param in model.encoder.parameters():
+            print("\n[!] Unfreezing backbone for fine-tuning...")
+            for param in model.backbone.parameters():
                 param.requires_grad = True
-                
+
         print(f"\nEpoch {epoch+1}/{epochs}")
         print("-" * 20)
         
@@ -163,27 +161,18 @@ def train_model():
         train_loss = 0.0
         
         train_pbar = tqdm(train_loader, desc="Training")
-        for batch_idx, (volumes, labels) in enumerate(train_pbar):
+        for volumes, labels in train_pbar:
             volumes = volumes.to(device)
             labels = labels.to(device)
             
             optimizer.zero_grad()
             
-            # Autocast (FP16/BF16)
-            with torch.amp.autocast('cuda'):
-                outputs = model(volumes)
-                loss = criterion(outputs, labels)
+            outputs = model(volumes)
+            loss = criterion(outputs, labels)
             
-            # Backward pass scalata
-            scaler.scale(loss).backward()
-            
-            # Unscale per il gradient clipping
-            scaler.unscale_(optimizer)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # Ottimizzazione
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             
             train_loss += loss.item() * volumes.size(0)
             train_pbar.set_postfix({'loss': f"{loss.item():.4f}"})
@@ -201,10 +190,8 @@ def train_model():
                 volumes = volumes.to(device)
                 labels = labels.to(device)
                 
-                # Autocast anche in validazione!
-                with torch.amp.autocast('cuda'):
-                    outputs = model(volumes)
-                    loss = criterion(outputs, labels)
+                outputs = model(volumes)
+                loss = criterion(outputs, labels)
                 
                 val_loss += loss.item() * volumes.size(0)
                 val_pbar.set_postfix({'loss': f"{loss.item():.4f}"})
@@ -240,7 +227,7 @@ def train_model():
             best_val_loss = epoch_val_loss
             patience_counter = 0
             
-            save_path = save_dir / "best_ink_model.pth"
+            save_path = save_dir / "best_ink_model_mac.pth"
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -253,13 +240,12 @@ def train_model():
             print(f"Nessun miglioramento per {patience_counter} epoca/he.")
             if patience_counter >= patience_limit:
                 print(f"\n[!] Early Stopping all'epoca {epoch+1}.")
-                print(f"Training interrotto. Miglior Val Loss: {best_val_loss:.4f}")
                 break 
         
     # Salvataggio Modello Finale
-    final_path = save_dir / "final_ink_model.pth"
+    final_path = save_dir / "final_ink_model_mac.pth"
     torch.save(model.state_dict(), final_path)
-    print(f"\nTraining completo. Pesi finali salvati in {final_path}")
+    print(f"\nTraining completo. Pesi salvati in {final_path}")
     
     if use_wandb:
         wandb.finish()

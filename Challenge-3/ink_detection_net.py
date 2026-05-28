@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels):
+    def __init__(self, in_channels, skip_channels, out_channels, dropout_prob=0.2):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels + skip_channels, out_channels, kernel_size=3, padding=1, bias=False),
@@ -12,7 +12,8 @@ class DecoderBlock(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(p=dropout_prob)
         )
 
     def forward(self, x, skip=None):

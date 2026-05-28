@@ -12,10 +12,10 @@ CURRENT_DIR = Path(__file__).parent
 
 def run_all_inferences():
     # --- Configuration ---
-    test_dir = Path("/Volumes/ZX20/eliva-26-ink-detection/test")
+    test_dir = Path("/Volumes/ZX20/eliva-26-ink-detection/train")  
     checkpoint_path = CURRENT_DIR / "checkpoints" / "best_ink_model.pth"
-    patch_size = 1024 
-    slice_range = (0, 64)
+    patch_size = 256   
+    slice_range = (15, 45)
     input_channels = slice_range[1] - slice_range[0] # 64 channels for the model input
     threshold = 0.5 # Threshold for binary mask generation, can be tuned based on validation results
     
