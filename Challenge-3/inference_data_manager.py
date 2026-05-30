@@ -3,16 +3,16 @@ from pathlib import Path
 from PIL import Image
 
 class InferenceDataManager:
-    def __init__(self, data_dir, patch_size=256, slices=(20, 45)):
+    def __init__(self, data_dir, patch_size=256, stride=128, slices=(20, 45)):
         self.data_dir = Path(data_dir)
         self.patch_size = patch_size
+        self.stride = stride
         self.slices = slices
         
         # State variables for the current active fragment
         self.current_fragment_id = None
         self.volume = None
-        self.num_patches_x = 0
-        self.num_patches_y = 0
+        self.positions = []
         self.total_patches = 0
         self.image_shape = (0, 0)
 
@@ -31,28 +31,38 @@ class InferenceDataManager:
         h, w = self.volume.shape[1], self.volume.shape[2]
         self.image_shape = (h, w)
         
-        # Calculate grid (we use floor division, or handle padding if needed)
-        # To be safe and cover everything, we often pad or handle the remainder
-        self.num_patches_x = w // self.patch_size
-        self.num_patches_y = h // self.patch_size
-        self.total_patches = self.num_patches_x * self.num_patches_y
+        # Calculate overlapping positions
+        self.positions = []
+        for y in range(0, h - self.patch_size + 1, self.stride):
+            for x in range(0, w - self.patch_size + 1, self.stride):
+                self.positions.append((y, x))
         
-        print(f"Fragment {fragment_id} loaded. Grid: {self.num_patches_x}x{self.num_patches_y} ({self.total_patches} patches)")
+        # Ensure we cover the right and bottom edges
+        if (h - self.patch_size) % self.stride != 0:
+            for x in range(0, w - self.patch_size + 1, self.stride):
+                self.positions.append((h - self.patch_size, x))
+        
+        if (w - self.patch_size) % self.stride != 0:
+            for y in range(0, h - self.patch_size + 1, self.stride):
+                self.positions.append((y, w - self.patch_size))
+                
+        # Handle the bottom-right corner explicitly
+        self.positions.append((h - self.patch_size, w - self.patch_size))
+        
+        # Remove duplicates and sort for deterministic behavior
+        self.positions = sorted(list(set(self.positions)))
+        self.total_patches = len(self.positions)
+        
+        print(f"Fragment {fragment_id} loaded. Image size: {w}x{h}. Total overlapping patches: {self.total_patches}")
 
     def get_patch(self, patch_idx):
-        """Returns a 3D patch and its top-left coordinates given a grid index."""
+        """Returns a 3D patch and its top-left coordinates given an index."""
         if self.volume is None:
             raise ValueError("No fragment set. Call set_fragment() first.")
             
-        # 1. Calculate grid coordinates (row, col)
-        row = patch_idx // self.num_patches_x
-        col = patch_idx % self.num_patches_x
+        y, x = self.positions[patch_idx]
         
-        # 2. Convert to pixel coordinates
-        y = row * self.patch_size
-        x = col * self.patch_size
-        
-        # 3. Extract the 3D patch: [Slices, Patch_H, Patch_W]
+        # Extract the 3D patch: [Slices, Patch_H, Patch_W]
         z1, z2 = self.slices
         patch_3d = self.volume[z1:z2, y:y+self.patch_size, x:x+self.patch_size]
         

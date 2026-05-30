@@ -11,10 +11,12 @@ def rle_encode(mask: np.ndarray) -> str:
     changes[1::2] -= changes[::2]
     return " ".join(str(x) for x in changes)
 
+PARENT_DIR = Path(__file__).parent
+
 def build_submission():
     # --- Configuration ---
     test_dir = Path("/Volumes/ZX20/eliva-26-ink-detection/test")
-    output_csv = "submission.csv"
+    output_csv = PARENT_DIR / "submission_extreme.csv"
     
     print(f"Scanning test directory: {test_dir}")
     
@@ -24,7 +26,7 @@ def build_submission():
     results = []
     
     for fid in tqdm(fragment_ids, desc="Generating RLE for fragments"):
-        pred_path = test_dir / fid / "predictions.png"
+        pred_path = test_dir / fid / "predictions_extreme.png"
         
         if not pred_path.exists():
             print(f"Warning: No prediction found for {fid} at {pred_path}. Skipping.")
